@@ -1,5 +1,3 @@
-
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { initializeApp } from 'firebase/app';
 import { 
@@ -49,11 +47,25 @@ import {
 } from 'lucide-react';
 
 // --- Firebase Configuration & Initialization ---
-const firebaseConfig = JSON.parse(__firebase_config);
+const firebaseConfig = (() => {
+  const rawConfig = import.meta.env.VITE_FIREBASE_CONFIG;
+  if (!rawConfig) {
+    console.warn('VITE_FIREBASE_CONFIG is missing. Firebase may fail to initialize.');
+    return {};
+  }
+  try {
+    return JSON.parse(rawConfig);
+  } catch (err) {
+    console.error('Invalid VITE_FIREBASE_CONFIG JSON string.', err);
+    return {};
+  }
+})();
+
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const appId = import.meta.env.VITE_APP_ID || 'default-app-id';
+const initialAuthToken = import.meta.env.VITE_INITIAL_AUTH_TOKEN;
 
 // --- Constants & Utils ---
 const COLLECTIONS = {
@@ -1643,8 +1655,8 @@ export default function App() {
   // 1. Initialize Auth & Listeners
   useEffect(() => {
     const initAuth = async () => {
-      if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-        await signInWithCustomToken(auth, __initial_auth_token);
+      if (initialAuthToken) {
+        await signInWithCustomToken(auth, initialAuthToken);
       } else {
         await signInAnonymously(auth);
       }
