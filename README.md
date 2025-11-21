@@ -1,16 +1,23 @@
-# React + Vite
+# Employee Platform
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Modern employee management portal built with React (Vite) and Firebase. It centralizes daily attendance tracking, task assignments, approvals, and real-time status cards for both managers and employees.
 
-Currently, two official plugins are available:
+- Attendance check-in/out with late detection against configurable schedules
+- Manager dashboards for approvals, workload insights, and live updates
+- Employee dashboard for tasks, leave summaries, and attendance history
+- Tailwind CSS styling with responsive layout optimized for desktop/tablet
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## 🌐 Live Demo
 
-## React Compiler
+Explore the latest build at **https://employee-platform-rho.vercel.app/**.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+> Best experienced on desktop. Use your own Firebase project credentials when cloning locally.
 
-## Expanding the ESLint configuration
+## Getting Started
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+```bash
+npm install
+npm run dev
+```
+
+Configure Firebase keys and the `config/workSchedule` document before running in production.

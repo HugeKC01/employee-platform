@@ -33,6 +33,7 @@ import {
   Plus,         
   ChevronLeft,  
   ChevronRight,
+  ChevronDown,
   ClipboardList,
   History,
   X,
@@ -139,6 +140,20 @@ const formatDuration = (totalMinutes) => {
   return `${minutes}m`;
 };
 
+const getTaskAssigneeIds = (task) => {
+  if (Array.isArray(task?.assigneeIds) && task.assigneeIds.length > 0) {
+    return task.assigneeIds;
+  }
+  return task?.userId ? [task.userId] : [];
+};
+
+const getTaskAssignees = (task, users = []) => {
+  const ids = getTaskAssigneeIds(task);
+  return ids
+    .map(id => users.find(u => u.id === id))
+    .filter(Boolean);
+};
+
 // --- Components ---
 
 // --- NEW COMPONENT: Manager Analytics View ---
@@ -164,7 +179,7 @@ const ManagerStatsView = ({ users, attendance, leaves, tasks }) => {
         l.userId === u.id && l.status === 'approved' && l.startDate >= startDate && l.startDate <= endDate
       );
 
-      const userTasks = tasks.filter(t => t.userId === u.id && t.status === TASK_STATUS.PENDING);
+      const userTasks = tasks.filter(t => getTaskAssigneeIds(t).includes(u.id) && t.status === TASK_STATUS.PENDING);
 
       const daysPresent = new Set(userAtt.map(r => {
         const d = safeDate(r.timestamp);
@@ -455,11 +470,30 @@ const ManagerTaskView = ({ users, tasks, onAssignTask }) => {
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [newTaskDueDate, setNewTaskDueDate] = useState('');
   const [selectedAssignees, setSelectedAssignees] = useState([]);
+  const [selectedTeams, setSelectedTeams] = useState([]);
 
   const employeeOptions = useMemo(() => users.filter(u => u.role === 'employee'), [users]);
+  const teamOptions = useMemo(() => {
+    const grouped = employeeOptions.reduce((acc, emp) => {
+      const branchName = emp.branch || 'Unassigned';
+      if (!acc[branchName]) acc[branchName] = [];
+      acc[branchName].push(emp);
+      return acc;
+    }, {});
+    return Object.entries(grouped).map(([branch, members]) => ({ branch, members }));
+  }, [employeeOptions]);
+
+  const computedAssigneeIds = useMemo(() => {
+    const ids = new Set(selectedAssignees);
+    selectedTeams.forEach(branch => {
+      const team = teamOptions.find(t => t.branch === branch);
+      team?.members.forEach(member => ids.add(member.id));
+    });
+    return Array.from(ids);
+  }, [selectedAssignees, selectedTeams, teamOptions]);
 
   const filteredTasks = tasks.filter(task => {
-    const matchesEmployee = selectedEmployee === 'all' || task.userId === selectedEmployee;
+    const matchesEmployee = selectedEmployee === 'all' || getTaskAssigneeIds(task).includes(selectedEmployee);
     const matchesStatus = task.status === statusFilter;
     return matchesEmployee && matchesStatus;
   });
@@ -470,20 +504,29 @@ const ManagerTaskView = ({ users, tasks, onAssignTask }) => {
     setSelectedAssignees(prev => prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]);
   };
 
-  const handleSelectAll = () => setSelectedAssignees(employeeOptions.map(emp => emp.id));
+  const handleSelectAll = () => {
+    setSelectedAssignees(employeeOptions.map(emp => emp.id));
+    setSelectedTeams(teamOptions.map(team => team.branch));
+  };
   const handleClearAssignees = () => setSelectedAssignees([]);
+  const toggleTeam = (branch) => {
+    setSelectedTeams(prev => prev.includes(branch) ? prev.filter(item => item !== branch) : [...prev, branch]);
+  };
+  const handleClearTeams = () => setSelectedTeams([]);
+  const teamMemberCount = (branch) => teamOptions.find(team => team.branch === branch)?.members.length || 0;
 
-  const handleAssignSubmit = (e) => {
+  const handleAssignSubmit = async (e) => {
     e.preventDefault();
-    if (!newTaskTitle.trim() || selectedAssignees.length === 0 || !onAssignTask) return;
-    onAssignTask({
+    if (!newTaskTitle.trim() || computedAssigneeIds.length === 0 || !onAssignTask) return;
+    await onAssignTask({
       title: newTaskTitle.trim(),
       dueDate: newTaskDueDate || null,
-      assigneeIds: selectedAssignees,
+      assigneeIds: computedAssigneeIds,
     });
     setNewTaskTitle('');
     setNewTaskDueDate('');
     setSelectedAssignees([]);
+    setSelectedTeams([]);
   };
 
   return (
@@ -492,9 +535,9 @@ const ManagerTaskView = ({ users, tasks, onAssignTask }) => {
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-4">
           <div>
             <p className="text-sm font-semibold text-gray-700">Assign New Task</p>
-            <p className="text-xs text-gray-500">Select one or more employees and assign the same task to them.</p>
+            <p className="text-xs text-gray-500">Assign to individual coworkers or whole teams in one go.</p>
           </div>
-          <div className="text-xs text-gray-500">{selectedAssignees.length} assignee(s) selected</div>
+          <div className="text-xs text-gray-500">{computedAssigneeIds.length} assignee(s) selected</div>
         </div>
         <form onSubmit={handleAssignSubmit} className="space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -540,12 +583,39 @@ const ManagerTaskView = ({ users, tasks, onAssignTask }) => {
                 </label>
               ))}
             </div>
+            {teamOptions.length > 0 && (
+              <div className="mt-4 border-t border-dashed border-slate-200 pt-4">
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-xs font-semibold text-slate-600 uppercase">Teams</p>
+                  <div className="space-x-2 text-xs">
+                    <button type="button" onClick={() => setSelectedTeams(teamOptions.map(team => team.branch))} className="text-indigo-600 hover:underline">Select All</button>
+                    <button type="button" onClick={handleClearTeams} className="text-slate-500 hover:underline">Clear</button>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {teamOptions.map(team => (
+                    <button
+                      key={team.branch}
+                      type="button"
+                      onClick={() => toggleTeam(team.branch)}
+                      className={`px-3 py-1 text-xs font-semibold rounded-full border transition-colors ${
+                        selectedTeams.includes(team.branch)
+                          ? 'bg-indigo-600 border-indigo-600 text-white'
+                          : 'bg-white border-gray-200 text-gray-600 hover:border-indigo-300 hover:text-indigo-600'
+                      }`}
+                    >
+                      {team.branch} • {teamMemberCount(team.branch)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
           <div className="flex justify-end">
             <button
               type="submit"
               className="px-5 py-2 bg-indigo-600 text-white rounded-lg font-semibold disabled:opacity-50"
-              disabled={!newTaskTitle.trim() || selectedAssignees.length === 0}
+              disabled={!newTaskTitle.trim() || computedAssigneeIds.length === 0}
             >
               Assign Task
             </button>
@@ -610,7 +680,8 @@ const ManagerTaskView = ({ users, tasks, onAssignTask }) => {
             </div>
           ) : (
             sortedTasks.map(task => {
-              const taskUser = users.find(u => u.id === task.userId);
+              const assignees = getTaskAssignees(task, users);
+              const extraCount = assignees.length > 1 ? assignees.length - 1 : 0;
               return (
                 <div key={task.id} className="p-4 hover:bg-gray-50 transition-colors flex items-start space-x-4">
                   <div className={`mt-1 w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 ${
@@ -637,12 +708,21 @@ const ManagerTaskView = ({ users, tasks, onAssignTask }) => {
                     <div className="flex items-center mt-2 space-x-2">
                       <div className="flex items-center text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded-md">
                         <UserCircle className="w-3 h-3 mr-1" />
-                        {taskUser ? taskUser.name : 'Unknown User'}
+                        {assignees.length > 0 ? assignees[0].name : 'Unassigned'}
                       </div>
-                      {taskUser && (
-                        <span className="text-xs text-gray-400">• {taskUser.position}</span>
+                      {extraCount > 0 && (
+                        <span className="text-xs text-gray-400">+{extraCount} more</span>
                       )}
                     </div>
+                    {assignees.length > 1 && (
+                      <div className="flex flex-wrap gap-1 mt-2">
+                        {assignees.slice(1).map(person => (
+                          <span key={person.id} className="text-[11px] px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">
+                            {person.name}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               );
@@ -761,19 +841,34 @@ const AttendanceView = ({ user, recordAttendance, attendance, workSchedule = DEF
   );
 };
 
-const TaskView = ({ user, tasks, toggleTask, addTask }) => {
+const TaskView = ({ user, users = [], tasks, toggleTask, addTask }) => {
   const [newTask, setNewTask] = useState('');
   const [newDueDate, setNewDueDate] = useState('');
+  const [selectedCoworkers, setSelectedCoworkers] = useState([]);
 
-  const handleAdd = (e) => {
+  const coworkerOptions = useMemo(
+    () => users.filter(u => u.role === 'employee' && u.id !== user.id),
+    [users, user.id]
+  );
+
+  const handleAdd = async (e) => {
     e.preventDefault();
-    if (!newTask.trim()) return;
-    addTask(newTask, newDueDate);
+    if (!newTask.trim() || !addTask) return;
+    await addTask({
+      title: newTask.trim(),
+      dueDate: newDueDate || null,
+      assigneeIds: selectedCoworkers,
+    });
     setNewTask('');
     setNewDueDate('');
+    setSelectedCoworkers([]);
   };
 
-  const myTasks = tasks.filter(t => t.userId === user.id);
+  const myTasks = tasks.filter(t => getTaskAssigneeIds(t).includes(user.id));
+
+  const toggleCoworker = (id) => {
+    setSelectedCoworkers(prev => prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]);
+  };
 
   return (
     <div className="space-y-6">
@@ -782,27 +877,51 @@ const TaskView = ({ user, tasks, toggleTask, addTask }) => {
       </div>
 
       <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-        <form onSubmit={handleAdd} className="flex flex-col md:flex-row gap-4 mb-6">
-          <div className="flex-1">
-             <input
-              type="text"
-              value={newTask}
-              onChange={(e) => setNewTask(e.target.value)}
-              placeholder="Add a new task..."
-              className="w-full border border-gray-200 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
+        <form onSubmit={handleAdd} className="space-y-4 mb-6">
+          <div className="flex flex-col md:flex-row gap-4">
+            <div className="flex-1">
+               <input
+                type="text"
+                value={newTask}
+                onChange={(e) => setNewTask(e.target.value)}
+                placeholder="Add a new task..."
+                className="w-full border border-gray-200 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+            <div className="w-full md:w-48">
+               <input 
+                 type="date"
+                 value={newDueDate}
+                 onChange={(e) => setNewDueDate(e.target.value)}
+                 className="w-full border border-gray-200 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-gray-600"
+               />
+            </div>
+            <button type="submit" className="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700 transition-colors whitespace-nowrap">
+              Add Task
+            </button>
           </div>
-          <div className="w-full md:w-48">
-             <input 
-               type="date"
-               value={newDueDate}
-               onChange={(e) => setNewDueDate(e.target.value)}
-               className="w-full border border-gray-200 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-gray-600"
-             />
-          </div>
-          <button type="submit" className="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700 transition-colors whitespace-nowrap">
-            Add Task
-          </button>
+
+          {coworkerOptions.length > 0 && (
+            <div className="bg-slate-50 border border-dashed border-slate-200 rounded-lg p-3">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs font-semibold text-slate-600 uppercase">Add Coworkers</p>
+                <span className="text-xs text-gray-500">{selectedCoworkers.length} selected</span>
+              </div>
+              <div className="max-h-32 overflow-y-auto space-y-1 pr-1">
+                {coworkerOptions.map(person => (
+                  <label key={person.id} className="flex items-center space-x-2 text-sm text-gray-700">
+                    <input
+                      type="checkbox"
+                      checked={selectedCoworkers.includes(person.id)}
+                      onChange={() => toggleCoworker(person.id)}
+                      className="text-indigo-600 border-gray-300 rounded"
+                    />
+                    <span>{person.name} <span className="text-xs text-gray-400">({person.branch})</span></span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
         </form>
 
         <div className="space-y-3">
@@ -812,36 +931,51 @@ const TaskView = ({ user, tasks, toggleTask, addTask }) => {
               <p>No tasks yet. Add one above!</p>
             </div>
           )}
-          {myTasks.map(task => (
-            <div 
-              key={task.id} 
-              className={`flex items-center p-4 rounded-lg border transition-all ${
-                task.status === TASK_STATUS.COMPLETED 
-                  ? 'bg-gray-50 border-gray-100' 
-                  : 'bg-white border-gray-200 hover:border-indigo-300'
-              }`}
-            >
-              <button 
-                onClick={() => toggleTask(task)}
-                className={`w-6 h-6 rounded border mr-4 flex items-center justify-center transition-colors ${
-                  task.status === TASK_STATUS.COMPLETED ? 'bg-green-500 border-green-500 text-white' : 'border-gray-300 text-transparent hover:border-indigo-500'
+          {myTasks.map(task => {
+            const assignees = getTaskAssignees(task, users);
+            const hasExplicitAssignees = assignees.length > 0;
+            const trulyUnassigned = !hasExplicitAssignees && getTaskAssigneeIds(task).length === 0;
+            return (
+              <div 
+                key={task.id} 
+                className={`flex items-center p-4 rounded-lg border transition-all ${
+                  task.status === TASK_STATUS.COMPLETED 
+                    ? 'bg-gray-50 border-gray-100' 
+                    : 'bg-white border-gray-200 hover:border-indigo-300'
                 }`}
               >
-                <CheckCircle2 className="w-4 h-4" />
-              </button>
-              <div className="flex-1">
-                 <span className={`block ${task.status === TASK_STATUS.COMPLETED ? 'text-gray-400 line-through' : 'text-gray-700'}`}>
-                   {task.title}
-                 </span>
-                 {task.dueDate && (
-                   <span className={`text-xs flex items-center mt-1 ${task.status === TASK_STATUS.COMPLETED ? 'text-gray-300' : 'text-red-500'}`}>
-                     <Calendar className="w-3 h-3 mr-1" /> Due: {formatDueDate(task.dueDate)}
+                <button 
+                  onClick={() => toggleTask(task)}
+                  className={`w-6 h-6 rounded border mr-4 flex items-center justify-center transition-colors ${
+                    task.status === TASK_STATUS.COMPLETED ? 'bg-green-500 border-green-500 text-white' : 'border-gray-300 text-transparent hover:border-indigo-500'
+                  }`}
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                </button>
+                <div className="flex-1">
+                   <span className={`block ${task.status === TASK_STATUS.COMPLETED ? 'text-gray-400 line-through' : 'text-gray-700'}`}>
+                     {task.title}
                    </span>
-                 )}
+                   {task.dueDate && (
+                     <span className={`text-xs flex items-center mt-1 ${task.status === TASK_STATUS.COMPLETED ? 'text-gray-300' : 'text-red-500'}`}>
+                       <Calendar className="w-3 h-3 mr-1" /> Due: {formatDueDate(task.dueDate)}
+                     </span>
+                   )}
+                   <div className="flex flex-wrap gap-1 mt-2">
+                     {hasExplicitAssignees && assignees.map(person => (
+                       <span key={person.id} className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
+                         {person.name}
+                       </span>
+                     ))}
+                     {trulyUnassigned && (
+                       <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">Unassigned</span>
+                     )}
+                   </div>
+                </div>
+                <span className="text-xs text-gray-400 ml-2">{formatDate(task.createdAt)}</span>
               </div>
-              <span className="text-xs text-gray-400 ml-2">{formatDate(task.createdAt)}</span>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </div>
@@ -942,12 +1076,17 @@ const LeaveView = ({ user, leaves, submitLeave }) => {
   );
 };
 
-const EmployeeHistoryModal = ({ targetUser, attendance, leaves, onClose }) => {
+const EmployeeHistoryModal = ({ targetUser, attendance, leaves, onClose, workSchedule = DEFAULT_WORK_SCHEDULE }) => {
   const [activeTab, setActiveTab] = useState('stats');
   const [filterType, setFilterType] = useState('monthly'); 
   const [filterDate, setFilterDate] = useState(new Date().toISOString().split('T')[0]);
   const [filterMonth, setFilterMonth] = useState(new Date().toISOString().slice(0, 7));
   const [filterYear, setFilterYear] = useState(new Date().getFullYear().toString());
+
+  const normalizedSchedule = useMemo(() => normalizeSchedule(workSchedule), [workSchedule]);
+  const scheduleStartMinutes = timeStringToMinutes(normalizedSchedule.startTime) ?? timeStringToMinutes(DEFAULT_WORK_SCHEDULE.startTime);
+  const graceMinutes = Number(normalizedSchedule.graceMinutes ?? DEFAULT_WORK_SCHEDULE.graceMinutes) || 0;
+  const lateThresholdMinutes = scheduleStartMinutes === null ? null : scheduleStartMinutes + graceMinutes;
 
   const filteredData = useMemo(() => {
     const filteredAtt = attendance.filter(a => {
@@ -1000,6 +1139,49 @@ const EmployeeHistoryModal = ({ targetUser, attendance, leaves, onClose }) => {
       leavesTaken: lvs.length
     };
   }, [filteredData]);
+
+  const computeLateSet = useCallback((records = []) => {
+    if (!Array.isArray(records) || lateThresholdMinutes === null) {
+      return new Set();
+    }
+
+    const firstCheckInByDay = records.reduce((acc, record) => {
+      if (record.type !== 'check-in') return acc;
+      const dateObj = safeDate(record.timestamp);
+      if (!dateObj) return acc;
+      const dayKey = dateObj.toISOString().split('T')[0];
+      const existing = acc[dayKey];
+      if (!existing || (record.timestamp?.seconds || 0) < (existing.timestamp?.seconds || 0)) {
+        acc[dayKey] = record;
+      }
+      return acc;
+    }, {});
+
+    const lateIds = new Set();
+    Object.values(firstCheckInByDay).forEach(record => {
+      const minutes = minutesFromTimestamp(record.timestamp);
+      if (minutes !== null && minutes > lateThresholdMinutes) {
+        lateIds.add(record.id);
+      }
+    });
+
+    return lateIds;
+  }, [lateThresholdMinutes]);
+
+  const lateRecordsFiltered = useMemo(
+    () => computeLateSet(filteredData.attendance),
+    [filteredData.attendance, computeLateSet]
+  );
+
+  const lateRecordsAllTime = useMemo(
+    () => computeLateSet(attendance.filter(a => a.userId === targetUser.id)),
+    [attendance, targetUser.id, computeLateSet]
+  );
+
+  const lateSummary = useMemo(
+    () => ({ lateDays: lateRecordsFiltered.size, lateRecordIds: lateRecordsFiltered }),
+    [lateRecordsFiltered]
+  );
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
@@ -1068,7 +1250,7 @@ const EmployeeHistoryModal = ({ targetUser, attendance, leaves, onClose }) => {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4">
                 <div className="p-4 bg-blue-50 rounded-xl border border-blue-100">
                    <p className="text-xs text-blue-600 font-bold uppercase mb-1">Days Present</p>
                    <p className="text-2xl font-bold text-gray-800">{stats.daysPresent}</p>
@@ -1085,6 +1267,11 @@ const EmployeeHistoryModal = ({ targetUser, attendance, leaves, onClose }) => {
                    <p className="text-xs text-orange-600 font-bold uppercase mb-1">Leaves</p>
                    <p className="text-2xl font-bold text-gray-800">{stats.leavesTaken}</p>
                 </div>
+                 <div className="p-4 bg-yellow-50 rounded-xl border border-yellow-100">
+                   <p className="text-xs text-yellow-600 font-bold uppercase mb-1">Late Days</p>
+                   <p className="text-2xl font-bold text-gray-800">{lateSummary.lateDays}</p>
+                   <p className="text-[11px] text-yellow-700 mt-1">Grace {graceMinutes}m</p>
+                 </div>
               </div>
 
               <div className="border-t border-gray-100 pt-6">
@@ -1096,15 +1283,23 @@ const EmployeeHistoryModal = ({ targetUser, attendance, leaves, onClose }) => {
                   {filteredData.attendance.length === 0 && <p className="text-gray-400 text-sm italic">No attendance records found for this period.</p>}
                   {filteredData.attendance
                     .sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0))
-                    .map(record => (
-                    <div key={record.id} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg text-sm">
-                      <span className={`capitalize font-medium ${record.type === 'check-in' ? 'text-green-600' : 'text-red-600'}`}>{record.type.replace('-', ' ')}</span>
-                      <div className="text-right">
-                        <span className="text-gray-900 font-bold block">{formatTime(record.timestamp)}</span>
-                        <span className="text-gray-500 text-xs">{formatDate(record.timestamp)}</span>
-                      </div>
-                    </div>
-                  ))}
+                    .map(record => {
+                      const isLateRecord = record.type === 'check-in' && lateSummary.lateRecordIds.has(record.id);
+                      return (
+                        <div key={record.id} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg text-sm">
+                          <div className="flex items-center gap-2">
+                            <span className={`capitalize font-medium ${record.type === 'check-in' ? 'text-green-600' : 'text-red-600'}`}>{record.type.replace('-', ' ')}</span>
+                            {isLateRecord && (
+                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-yellow-100 text-yellow-700 uppercase tracking-wide">Late</span>
+                            )}
+                          </div>
+                          <div className="text-right">
+                            <span className="text-gray-900 font-bold block">{formatTime(record.timestamp)}</span>
+                            <span className="text-gray-500 text-xs">{formatDate(record.timestamp)}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
                 </div>
               </div>
             </div>
@@ -1118,18 +1313,24 @@ const EmployeeHistoryModal = ({ targetUser, attendance, leaves, onClose }) => {
                  attendance
                    .filter(a => a.userId === targetUser.id)
                    .sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0))
-                   .map(record => (
-                   <div key={record.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-100">
-                      <div className="flex items-center space-x-3">
-                        <div className={`w-2 h-2 rounded-full ${record.type === 'check-in' ? 'bg-green-500' : 'bg-red-500'}`}></div>
-                        <span className="font-medium text-gray-700 capitalize">{record.type.replace('-', ' ')}</span>
-                      </div>
-                      <div className="text-right">
-                        <div className="text-sm font-bold text-gray-800">{formatTime(record.timestamp)}</div>
-                        <div className="text-xs text-gray-400">{formatDate(record.timestamp)}</div>
-                      </div>
-                   </div>
-                 ))
+                   .map(record => {
+                     const isLateRecord = record.type === 'check-in' && lateRecordsAllTime.has(record.id);
+                     return (
+                       <div key={record.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-100">
+                          <div className="flex items-center space-x-3">
+                            <div className={`w-2 h-2 rounded-full ${record.type === 'check-in' ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                            <span className="font-medium text-gray-700 capitalize">{record.type.replace('-', ' ')}</span>
+                            {isLateRecord && (
+                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-yellow-100 text-yellow-700 uppercase tracking-wide">Late</span>
+                            )}
+                          </div>
+                          <div className="text-right">
+                            <div className="text-sm font-bold text-gray-800">{formatTime(record.timestamp)}</div>
+                            <div className="text-xs text-gray-400">{formatDate(record.timestamp)}</div>
+                          </div>
+                       </div>
+                     );
+                   })
               )}
             </div>
           )}
@@ -1168,7 +1369,7 @@ const EmployeeHistoryModal = ({ targetUser, attendance, leaves, onClose }) => {
   );
 };
 
-const EmployeesList = ({ users, attendance, leaves, tasks, onAddUser, onDeleteUser }) => {
+const EmployeesList = ({ users, attendance, leaves, tasks, onAddUser, onDeleteUser, workSchedule = DEFAULT_WORK_SCHEDULE }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [roleFilter, setRoleFilter] = useState('all'); 
   const [branchFilter, setBranchFilter] = useState('all'); 
@@ -1284,7 +1485,7 @@ const EmployeesList = ({ users, attendance, leaves, tasks, onAddUser, onDeleteUs
             <tbody className="divide-y divide-gray-100">
               {currentUsers.length > 0 ? (
                 currentUsers.map(user => {
-                  const pendingCount = tasks ? tasks.filter(t => t.userId === user.id && t.status === TASK_STATUS.PENDING).length : 0;
+                  const pendingCount = tasks ? tasks.filter(t => getTaskAssigneeIds(t).includes(user.id) && t.status === TASK_STATUS.PENDING).length : 0;
                   return (
                     <tr key={user.id} className="hover:bg-gray-50">
                       <td className="px-6 py-4 flex items-center space-x-3">
@@ -1450,15 +1651,39 @@ const EmployeesList = ({ users, attendance, leaves, tasks, onAddUser, onDeleteUs
           attendance={attendance} 
           leaves={leaves} 
           onClose={() => setHistoryUser(null)} 
+          workSchedule={workSchedule}
         />
       )}
     </div>
   );
 };
 
-const DailyStatusView = ({ users, attendance, workSchedule = DEFAULT_WORK_SCHEDULE }) => {
+const DailyStatusView = ({ users, attendance, leaves = [], workSchedule = DEFAULT_WORK_SCHEDULE }) => {
   const todayStr = new Date().toISOString().split('T')[0];
-  const employees = users.filter(u => u.role === 'employee');
+  const staffMembers = users.filter(u => u.role === 'employee' || u.role === 'manager');
+  const [showLeavePanel, setShowLeavePanel] = useState(false);
+
+  const todaysApprovedLeaves = useMemo(() => (
+    leaves
+      .filter(leave => {
+        if (!leave || leave.status !== 'approved') return false;
+        if (!leave.startDate || !leave.endDate) return false;
+        return leave.startDate <= todayStr && leave.endDate >= todayStr;
+      })
+      .map(leave => ({
+        ...leave,
+        user: users.find(u => u.id === leave.userId)
+      }))
+      .filter(entry => entry.user)
+  ), [leaves, todayStr, users]);
+
+  const leaveLookup = useMemo(() => (
+    todaysApprovedLeaves.reduce((acc, leave) => {
+      if (!acc[leave.userId]) acc[leave.userId] = [];
+      acc[leave.userId].push(leave);
+      return acc;
+    }, {})
+  ), [todaysApprovedLeaves]);
 
   const todaysCheckIns = attendance
     .filter(a => {
@@ -1473,33 +1698,37 @@ const DailyStatusView = ({ users, attendance, workSchedule = DEFAULT_WORK_SCHEDU
   }, {});
 
   const presentUserIds = new Set(todaysCheckIns.map(a => a.userId));
-  const presentEmployees = employees.filter(u => presentUserIds.has(u.id));
-  const absentEmployees = employees.filter(u => !presentUserIds.has(u.id));
+  const presentStaff = staffMembers.filter(u => presentUserIds.has(u.id));
+  const absentStaff = staffMembers.filter(u => !presentUserIds.has(u.id));
 
   const scheduleStartMinutes = timeStringToMinutes(workSchedule?.startTime) ?? timeStringToMinutes(DEFAULT_WORK_SCHEDULE.startTime);
   const graceMinutes = Number(workSchedule?.graceMinutes ?? DEFAULT_WORK_SCHEDULE.graceMinutes) || 0;
   const lateThresholdMinutes = scheduleStartMinutes === null ? null : scheduleStartMinutes + graceMinutes;
 
-  const presentDetails = presentEmployees.map(user => {
+  const presentDetails = presentStaff.map(user => {
     const record = firstCheckInByUser[user.id];
     const checkInMinutes = minutesFromTimestamp(record?.timestamp);
     const isLate = record && lateThresholdMinutes !== null && checkInMinutes !== null && checkInMinutes > lateThresholdMinutes;
     return { user, record, isLate };
   });
 
-  const lateEmployees = presentDetails.filter(detail => detail.isLate);
-  const totalEmployees = employees.length;
-  const attendanceRate = totalEmployees ? Math.round((presentEmployees.length / totalEmployees) * 100) : 0;
+  const lateStaff = presentDetails.filter(detail => detail.isLate);
+  const totalStaff = staffMembers.length;
+  const attendanceRate = totalStaff ? Math.round((presentStaff.length / totalStaff) * 100) : 0;
+
+  const onLeaveCount = todaysApprovedLeaves.length;
 
   const summaryCards = [
-    { label: 'Total Employees', value: totalEmployees, icon: Users, accent: 'bg-slate-100 text-slate-600' },
-    { label: 'Present Today', value: presentEmployees.length, icon: CheckCircle2, accent: 'bg-green-50 text-green-600' },
-    { label: 'Late Check-ins', value: lateEmployees.length, icon: Clock, accent: 'bg-yellow-50 text-yellow-600' },
-    { label: 'Absent Today', value: absentEmployees.length, icon: XCircle, accent: 'bg-red-50 text-red-600' },
+    { label: 'Total Staff', value: totalStaff, icon: Users, accent: 'bg-slate-100 text-slate-600' },
+    { label: 'Present Today', value: presentStaff.length, icon: CheckCircle2, accent: 'bg-green-50 text-green-600' },
+    { label: 'On Leave Today', value: onLeaveCount, icon: CalendarDays, accent: 'bg-orange-50 text-orange-600' },
+    { label: 'Late Check-ins', value: lateStaff.length, icon: Clock, accent: 'bg-yellow-50 text-yellow-600' },
+    { label: 'Absent Today', value: absentStaff.length, icon: XCircle, accent: 'bg-red-50 text-red-600' },
     { label: 'Attendance Rate', value: `${attendanceRate}%`, icon: BarChart3, accent: 'bg-indigo-50 text-indigo-600' }
   ];
 
-  const EmployeeCard = ({ user, status, checkInTime }) => {
+  const EmployeeCard = ({ user, status, checkInTime, leaveInfo }) => {
+    const primaryLeave = leaveInfo?.[0];
     const statusMeta = {
       present: {
         avatarBg: 'bg-green-500',
@@ -1515,6 +1744,11 @@ const DailyStatusView = ({ users, attendance, workSchedule = DEFAULT_WORK_SCHEDU
         avatarBg: 'bg-gray-300',
         badgeBg: 'bg-red-100 text-red-700',
         badgeText: 'Absent'
+      },
+      leave: {
+        avatarBg: 'bg-orange-400',
+        badgeBg: 'bg-orange-100 text-orange-700',
+        badgeText: `On Leave${primaryLeave?.type ? ` • ${primaryLeave.type}` : ''}`
       }
     };
 
@@ -1529,6 +1763,15 @@ const DailyStatusView = ({ users, attendance, workSchedule = DEFAULT_WORK_SCHEDU
           <div>
             <h4 className="font-bold text-gray-800">{user.name}</h4>
             <p className="text-xs text-gray-500">{user.position}</p>
+            {leaveInfo && (
+              <p className="text-[11px] text-gray-400 mt-1">
+                {leaveInfo.map((leave, idx) => (
+                  <span key={leave.id}>
+                    {leave.type} ({leave.startDate} - {leave.endDate}){idx < leaveInfo.length - 1 ? ', ' : ''}
+                  </span>
+                ))}
+              </p>
+            )}
           </div>
         </div>
         <div className={`px-3 py-1 rounded-full text-xs font-bold ${meta.badgeBg}`}>
@@ -1548,9 +1791,11 @@ const DailyStatusView = ({ users, attendance, workSchedule = DEFAULT_WORK_SCHEDU
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4 space-y-4">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
           <p className="text-sm font-semibold text-gray-700">Working Hours Overview</p>
-          <p className="text-xs text-gray-500">Standard {workSchedule?.startTime || DEFAULT_WORK_SCHEDULE.startTime} - {workSchedule?.endTime || DEFAULT_WORK_SCHEDULE.endTime} • Grace {graceMinutes}m</p>
+          <p className="text-xs text-gray-500">
+            Standard {workSchedule?.startTime || DEFAULT_WORK_SCHEDULE.startTime} - {workSchedule?.endTime || DEFAULT_WORK_SCHEDULE.endTime} • Grace {graceMinutes}m • Leaves Today {onLeaveCount}
+          </p>
         </div>
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
           {summaryCards.map(card => (
             <div key={card.label} className="flex items-center justify-between p-4 bg-slate-50 border border-slate-100 rounded-xl">
               <div>
@@ -1568,7 +1813,7 @@ const DailyStatusView = ({ users, attendance, workSchedule = DEFAULT_WORK_SCHEDU
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="space-y-4">
           <div className="flex items-center justify-between mb-2">
-            <h3 className="font-semibold text-gray-700 flex items-center"><CheckCircle2 className="w-4 h-4 mr-2 text-green-500"/> Present ({presentEmployees.length})</h3>
+            <h3 className="font-semibold text-gray-700 flex items-center"><CheckCircle2 className="w-4 h-4 mr-2 text-green-500"/> Present ({presentStaff.length})</h3>
           </div>
           {presentDetails.length === 0 && <p className="text-gray-400 text-sm italic">No one has checked in yet.</p>}
           {presentDetails.map(detail => (
@@ -1583,12 +1828,47 @@ const DailyStatusView = ({ users, attendance, workSchedule = DEFAULT_WORK_SCHEDU
 
         <div className="space-y-4">
           <div className="flex items-center justify-between mb-2">
-            <h3 className="font-semibold text-gray-700 flex items-center"><XCircle className="w-4 h-4 mr-2 text-red-500"/> Absent ({absentEmployees.length})</h3>
+            <h3 className="font-semibold text-gray-700 flex items-center"><XCircle className="w-4 h-4 mr-2 text-red-500"/> Absent ({absentStaff.length})</h3>
           </div>
-          {absentEmployees.length === 0 && <p className="text-gray-400 text-sm italic">Everyone is present!</p>}
-          {absentEmployees.map(u => <EmployeeCard key={u.id} user={u} status="absent" />)}
+          {absentStaff.length === 0 && <p className="text-gray-400 text-sm italic">Everyone is present!</p>}
+          {absentStaff.map(u => (
+            <EmployeeCard
+              key={u.id}
+              user={u}
+              status={leaveLookup[u.id] ? 'leave' : 'absent'}
+              leaveInfo={leaveLookup[u.id]}
+            />
+          ))}
         </div>
       </div>
+
+      {todaysApprovedLeaves.length > 0 && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100">
+          <button
+            onClick={() => setShowLeavePanel(prev => !prev)}
+            className="w-full flex items-center justify-between px-4 py-3 text-sm font-semibold text-gray-700"
+          >
+            <span className="flex items-center">
+              <CalendarDays className="w-4 h-4 mr-2 text-orange-500" />
+              Today's Approved Leaves ({todaysApprovedLeaves.length})
+            </span>
+            <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${showLeavePanel ? 'rotate-180' : ''}`} />
+          </button>
+          {showLeavePanel && (
+            <div className="px-4 pb-4 space-y-3">
+              {todaysApprovedLeaves.map(entry => (
+                <div key={entry.id} className="p-3 bg-orange-50 border border-orange-100 rounded-lg flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-semibold text-orange-900">{entry.user.name}</p>
+                    <p className="text-xs text-orange-700">{entry.type} • {entry.startDate} - {entry.endDate}</p>
+                  </div>
+                  <span className="text-xs font-bold px-2 py-1 rounded-full bg-white text-orange-600 border border-orange-200">Approved</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };
@@ -1607,7 +1887,7 @@ const EmployeeDashboard = ({ user, attendance, tasks, leaves, onNavigate, workSc
 
   const todayAttendance = todayRecords.find(record => record.type === 'check-in') || null;
 
-  const pendingTasksList = tasks.filter(t => t.userId === user.id && t.status === TASK_STATUS.PENDING);
+  const pendingTasksList = tasks.filter(t => getTaskAssigneeIds(t).includes(user.id) && t.status === TASK_STATUS.PENDING);
   const pendingTasks = pendingTasksList.length;
   const approvedLeaves = leaves.filter(l => l.userId === user.id && l.status === 'approved').length;
 
@@ -2283,12 +2563,17 @@ export default function App() {
     });
   };
 
-  const handleAddTask = async (title, dueDate) => {
+  const handleAddTask = async ({ title, dueDate, assigneeIds }) => {
     if (!selectedProfile) return;
+    const participantIds = Array.from(new Set([
+      ...(assigneeIds && assigneeIds.length ? assigneeIds : []),
+      selectedProfile.id,
+    ]));
+
     await addDoc(collection(db, 'artifacts', appId, 'public', 'data', COLLECTIONS.TASKS), {
-      userId: selectedProfile.id,
       title,
-      dueDate, // Store as string YYYY-MM-DD or null
+      dueDate,
+      assigneeIds: participantIds,
       status: TASK_STATUS.PENDING,
       createdAt: serverTimestamp(),
       assignedBy: selectedProfile.id,
@@ -2298,16 +2583,17 @@ export default function App() {
 
   const handleAssignTasks = async ({ title, dueDate, assigneeIds }) => {
     if (!selectedProfile || assigneeIds.length === 0) return;
+    const uniqueIds = Array.from(new Set(assigneeIds));
     const taskCollection = collection(db, 'artifacts', appId, 'public', 'data', COLLECTIONS.TASKS);
-    const payloadBase = {
+    await addDoc(taskCollection, {
       title,
       dueDate,
+      assigneeIds: uniqueIds,
       status: TASK_STATUS.PENDING,
       createdAt: serverTimestamp(),
       assignedBy: selectedProfile.id,
       assignedByName: selectedProfile.name || 'Manager',
-    };
-    await Promise.all(assigneeIds.map((userId) => addDoc(taskCollection, { ...payloadBase, userId })));
+    });
   };
 
   const handleToggleTask = async (task) => {
@@ -2382,8 +2668,25 @@ export default function App() {
                 />
               )}
               {view === 'manager_stats' && <ManagerStatsView users={users} attendance={attendance} leaves={leaves} tasks={tasks} />} 
-              {view === 'employees' && <EmployeesList users={users} attendance={attendance} leaves={leaves} tasks={tasks} onAddUser={handleAddUser} onDeleteUser={handleDeleteUser} />}
-              {view === 'daily_status' && <DailyStatusView users={users} attendance={attendance} workSchedule={workSchedule} />}
+              {view === 'employees' && (
+                <EmployeesList 
+                  users={users} 
+                  attendance={attendance} 
+                  leaves={leaves} 
+                  tasks={tasks} 
+                  onAddUser={handleAddUser} 
+                  onDeleteUser={handleDeleteUser}
+                  workSchedule={workSchedule}
+                />
+              )}
+              {view === 'daily_status' && (
+                <DailyStatusView 
+                  users={users} 
+                  attendance={attendance} 
+                  leaves={leaves}
+                  workSchedule={workSchedule} 
+                />
+              )}
               {view === 'employee_tasks' && <ManagerTaskView users={users} tasks={tasks} onAssignTask={handleAssignTasks} />}
               {view === 'approvals' && <ApprovalView users={users} leaves={leaves} updateLeaveStatus={handleUpdateLeaveStatus} />}
             </>
@@ -2407,7 +2710,15 @@ export default function App() {
               workSchedule={workSchedule}
             />
           )}
-          {view === 'tasks' && <TaskView user={selectedProfile} tasks={tasks} addTask={handleAddTask} toggleTask={handleToggleTask} />}
+          {view === 'tasks' && (
+            <TaskView
+              user={selectedProfile}
+              users={users}
+              tasks={tasks}
+              addTask={handleAddTask}
+              toggleTask={handleToggleTask}
+            />
+          )}
           {view === 'leave' && <LeaveView user={selectedProfile} leaves={leaves} submitLeave={handleSubmitLeave} />}
         </div>
       </main>
