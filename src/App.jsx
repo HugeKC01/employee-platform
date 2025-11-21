@@ -13,6 +13,7 @@ import {
   addDoc,
   updateDoc, 
   deleteDoc, 
+  setDoc,
   onSnapshot, 
   serverTimestamp
 } from 'firebase/firestore';
@@ -66,6 +67,7 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const appId = import.meta.env.VITE_APP_ID || 'default-app-id';
 const initialAuthToken = import.meta.env.VITE_INITIAL_AUTH_TOKEN;
+const getWorkScheduleDocRef = () => doc(db, 'artifacts', appId, 'public', 'data', 'config', 'workSchedule');
 
 // --- Constants & Utils ---
 const COLLECTIONS = {
@@ -77,8 +79,29 @@ const COLLECTIONS = {
 
 const LEAVE_TYPES = ['Sick Leave', 'Vacation', 'Personal', 'Remote Work'];
 const TASK_STATUS = { PENDING: 'pending', COMPLETED: 'completed' };
+const DEFAULT_WORK_SCHEDULE = { startTime: '09:00', endTime: '17:00', graceMinutes: 15 };
+const normalizeSchedule = (schedule = DEFAULT_WORK_SCHEDULE) => ({
+  startTime: schedule.startTime || DEFAULT_WORK_SCHEDULE.startTime,
+  endTime: schedule.endTime || DEFAULT_WORK_SCHEDULE.endTime,
+  graceMinutes: Number.isFinite(Number(schedule.graceMinutes))
+    ? Number(schedule.graceMinutes)
+    : DEFAULT_WORK_SCHEDULE.graceMinutes
+});
 
 // --- Helper Functions ---
+
+const timeStringToMinutes = (value) => {
+  if (!value || typeof value !== 'string' || !value.includes(':')) return null;
+  const [hours, minutes] = value.split(':').map(Number);
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return null;
+  return hours * 60 + minutes;
+};
+
+const minutesFromTimestamp = (timestamp) => {
+  const date = safeDate(timestamp);
+  if (!date) return null;
+  return date.getHours() * 60 + date.getMinutes();
+};
 
 // Safely convert Firestore Timestamp to Date object
 const safeDate = (timestamp) => {
@@ -417,9 +440,14 @@ const Sidebar = ({ user, activeTab, setActiveTab, onLogout }) => {
   );
 };
 
-const ManagerTaskView = ({ users, tasks }) => {
+const ManagerTaskView = ({ users, tasks, onAssignTask }) => {
   const [selectedEmployee, setSelectedEmployee] = useState('all');
   const [statusFilter, setStatusFilter] = useState('pending');
+  const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [newTaskDueDate, setNewTaskDueDate] = useState('');
+  const [selectedAssignees, setSelectedAssignees] = useState([]);
+
+  const employeeOptions = useMemo(() => users.filter(u => u.role === 'employee'), [users]);
 
   const filteredTasks = tasks.filter(task => {
     const matchesEmployee = selectedEmployee === 'all' || task.userId === selectedEmployee;
@@ -429,11 +457,95 @@ const ManagerTaskView = ({ users, tasks }) => {
 
   const sortedTasks = filteredTasks.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
 
+  const toggleAssignee = (id) => {
+    setSelectedAssignees(prev => prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]);
+  };
+
+  const handleSelectAll = () => setSelectedAssignees(employeeOptions.map(emp => emp.id));
+  const handleClearAssignees = () => setSelectedAssignees([]);
+
+  const handleAssignSubmit = (e) => {
+    e.preventDefault();
+    if (!newTaskTitle.trim() || selectedAssignees.length === 0 || !onAssignTask) return;
+    onAssignTask({
+      title: newTaskTitle.trim(),
+      dueDate: newTaskDueDate || null,
+      assigneeIds: selectedAssignees,
+    });
+    setNewTaskTitle('');
+    setNewTaskDueDate('');
+    setSelectedAssignees([]);
+  };
+
   return (
     <div className="space-y-6">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-4">
+          <div>
+            <p className="text-sm font-semibold text-gray-700">Assign New Task</p>
+            <p className="text-xs text-gray-500">Select one or more employees and assign the same task to them.</p>
+          </div>
+          <div className="text-xs text-gray-500">{selectedAssignees.length} assignee(s) selected</div>
+        </div>
+        <form onSubmit={handleAssignSubmit} className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Task Title</label>
+              <input
+                type="text"
+                value={newTaskTitle}
+                onChange={(e) => setNewTaskTitle(e.target.value)}
+                placeholder="e.g. Prepare weekly report"
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Due Date</label>
+              <input
+                type="date"
+                value={newTaskDueDate}
+                onChange={(e) => setNewTaskDueDate(e.target.value)}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+          </div>
+          <div className="bg-slate-50 border border-dashed border-slate-200 rounded-lg p-3">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs font-semibold text-slate-600 uppercase">Assignees</p>
+              <div className="space-x-2 text-xs">
+                <button type="button" onClick={handleSelectAll} className="text-indigo-600 hover:underline">Select All</button>
+                <button type="button" onClick={handleClearAssignees} className="text-slate-500 hover:underline">Clear</button>
+              </div>
+            </div>
+            <div className="max-h-32 overflow-y-auto space-y-1 pr-1">
+              {employeeOptions.length === 0 && <p className="text-xs text-gray-400">No employees available.</p>}
+              {employeeOptions.map(emp => (
+                <label key={emp.id} className="flex items-center space-x-2 text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={selectedAssignees.includes(emp.id)}
+                    onChange={() => toggleAssignee(emp.id)}
+                    className="text-indigo-600 border-gray-300 rounded"
+                  />
+                  <span>{emp.name} <span className="text-xs text-gray-400">({emp.branch})</span></span>
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="flex justify-end">
+            <button
+              type="submit"
+              className="px-5 py-2 bg-indigo-600 text-white rounded-lg font-semibold disabled:opacity-50"
+              disabled={!newTaskTitle.trim() || selectedAssignees.length === 0}
+            >
+              Assign Task
+            </button>
+          </div>
+        </form>
+      </div>
+
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <h2 className="text-2xl font-bold text-gray-800">Employee Tasks</h2>
-        
         <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto">
           <div className="relative">
             <Users className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
@@ -443,12 +555,11 @@ const ManagerTaskView = ({ users, tasks }) => {
               className="w-full sm:w-64 pl-10 pr-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 appearance-none bg-white"
             >
               <option value="all">All Employees</option>
-              {users.filter(u => u.role === 'employee').map(u => (
+              {employeeOptions.map(u => (
                 <option key={u.id} value={u.id}>{u.name} ({u.branch})</option>
               ))}
             </select>
           </div>
-
           <div className="flex bg-gray-100 p-1 rounded-lg">
             <button
               onClick={() => setStatusFilter('pending')}
@@ -473,14 +584,13 @@ const ManagerTaskView = ({ users, tasks }) => {
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
         <div className="px-6 py-4 border-b border-gray-100 bg-gray-50 flex justify-between items-center">
           <h3 className="font-semibold text-gray-700 flex items-center">
-            <ListTodo className="w-4 h-4 mr-2" /> 
+            <ListTodo className="w-4 h-4 mr-2" />
             {statusFilter === 'pending' ? 'Pending Tasks' : 'Completed History'}
             <span className="ml-2 bg-gray-200 text-gray-600 text-xs px-2 py-0.5 rounded-full">
               {sortedTasks.length}
             </span>
           </h3>
         </div>
-
         <div className="divide-y divide-gray-100">
           {sortedTasks.length === 0 ? (
             <div className="p-12 text-center text-gray-400">
@@ -499,7 +609,6 @@ const ManagerTaskView = ({ users, tasks }) => {
                   }`}>
                     {task.status === 'completed' && <div className="w-2.5 h-2.5 rounded-full bg-green-500" />}
                   </div>
-                  
                   <div className="flex-1">
                     <div className="flex justify-between items-start">
                       <div>
@@ -516,7 +625,6 @@ const ManagerTaskView = ({ users, tasks }) => {
                         {formatDate(task.createdAt)}
                       </span>
                     </div>
-                    
                     <div className="flex items-center mt-2 space-x-2">
                       <div className="flex items-center text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded-md">
                         <UserCircle className="w-3 h-3 mr-1" />
@@ -1016,6 +1124,7 @@ const EmployeesList = ({ users, attendance, leaves, tasks, onAddUser, onDeleteUs
   });
   const [historyUser, setHistoryUser] = useState(null);
 
+
   const itemsPerPage = 10;
 
   const uniqueBranches = useMemo(() => {
@@ -1292,66 +1401,137 @@ const EmployeesList = ({ users, attendance, leaves, tasks, onAddUser, onDeleteUs
   );
 };
 
-const DailyStatusView = ({ users, attendance }) => {
+const DailyStatusView = ({ users, attendance, workSchedule = DEFAULT_WORK_SCHEDULE }) => {
   const todayStr = new Date().toISOString().split('T')[0];
   const employees = users.filter(u => u.role === 'employee');
 
-  const presentUserIds = new Set(attendance
+  const todaysCheckIns = attendance
     .filter(a => {
       const d = safeDate(a.timestamp);
       return d && d.toISOString().split('T')[0] === todayStr && a.type === 'check-in';
     })
-    .map(a => a.userId)
-  );
+    .sort((a, b) => (a.timestamp?.seconds || 0) - (b.timestamp?.seconds || 0));
 
+  const firstCheckInByUser = todaysCheckIns.reduce((acc, record) => {
+    if (!acc[record.userId]) acc[record.userId] = record;
+    return acc;
+  }, {});
+
+  const presentUserIds = new Set(todaysCheckIns.map(a => a.userId));
   const presentEmployees = employees.filter(u => presentUserIds.has(u.id));
   const absentEmployees = employees.filter(u => !presentUserIds.has(u.id));
 
-  const EmployeeCard = ({ user, status, checkInTime }) => (
-    <div className="flex items-center justify-between p-4 bg-white border border-gray-100 rounded-xl shadow-sm">
-       <div className="flex items-center space-x-4">
-          <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-white ${status === 'present' ? 'bg-green-500' : 'bg-gray-300'}`}>
-             {user.name.charAt(0)}
+  const scheduleStartMinutes = timeStringToMinutes(workSchedule?.startTime) ?? timeStringToMinutes(DEFAULT_WORK_SCHEDULE.startTime);
+  const graceMinutes = Number(workSchedule?.graceMinutes ?? DEFAULT_WORK_SCHEDULE.graceMinutes) || 0;
+  const lateThresholdMinutes = scheduleStartMinutes === null ? null : scheduleStartMinutes + graceMinutes;
+
+  const presentDetails = presentEmployees.map(user => {
+    const record = firstCheckInByUser[user.id];
+    const checkInMinutes = minutesFromTimestamp(record?.timestamp);
+    const isLate = record && lateThresholdMinutes !== null && checkInMinutes !== null && checkInMinutes > lateThresholdMinutes;
+    return { user, record, isLate };
+  });
+
+  const lateEmployees = presentDetails.filter(detail => detail.isLate);
+  const totalEmployees = employees.length;
+  const attendanceRate = totalEmployees ? Math.round((presentEmployees.length / totalEmployees) * 100) : 0;
+
+  const summaryCards = [
+    { label: 'Total Employees', value: totalEmployees, icon: Users, accent: 'bg-slate-100 text-slate-600' },
+    { label: 'Present Today', value: presentEmployees.length, icon: CheckCircle2, accent: 'bg-green-50 text-green-600' },
+    { label: 'Late Check-ins', value: lateEmployees.length, icon: Clock, accent: 'bg-yellow-50 text-yellow-600' },
+    { label: 'Absent Today', value: absentEmployees.length, icon: XCircle, accent: 'bg-red-50 text-red-600' },
+    { label: 'Attendance Rate', value: `${attendanceRate}%`, icon: BarChart3, accent: 'bg-indigo-50 text-indigo-600' }
+  ];
+
+  const EmployeeCard = ({ user, status, checkInTime }) => {
+    const statusMeta = {
+      present: {
+        avatarBg: 'bg-green-500',
+        badgeBg: 'bg-green-100 text-green-700',
+        badgeText: `On Time • ${checkInTime || '--:--'}`
+      },
+      late: {
+        avatarBg: 'bg-yellow-500',
+        badgeBg: 'bg-yellow-100 text-yellow-700',
+        badgeText: `Late • ${checkInTime || '--:--'}`
+      },
+      absent: {
+        avatarBg: 'bg-gray-300',
+        badgeBg: 'bg-red-100 text-red-700',
+        badgeText: 'Absent'
+      }
+    };
+
+    const meta = statusMeta[status] || statusMeta.absent;
+
+    return (
+      <div className="flex items-center justify-between p-4 bg-white border border-gray-100 rounded-xl shadow-sm">
+        <div className="flex items-center space-x-4">
+          <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-white ${meta.avatarBg}`}>
+            {user.name.charAt(0)}
           </div>
           <div>
-             <h4 className="font-bold text-gray-800">{user.name}</h4>
-             <p className="text-xs text-gray-500">{user.position}</p>
+            <h4 className="font-bold text-gray-800">{user.name}</h4>
+            <p className="text-xs text-gray-500">{user.position}</p>
           </div>
-       </div>
-       <div className={`px-3 py-1 rounded-full text-xs font-bold ${status === 'present' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-          {status === 'present' ? checkInTime : 'Absent'}
-       </div>
-    </div>
-  );
+        </div>
+        <div className={`px-3 py-1 rounded-full text-xs font-bold ${meta.badgeBg}`}>
+          {meta.badgeText}
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-         <h2 className="text-2xl font-bold text-gray-800">Daily Attendance Status</h2>
-         <span className="text-gray-500 bg-gray-100 px-3 py-1 rounded-lg text-sm font-medium">{formatDate({ seconds: new Date().getTime() / 1000 })}</span>
+        <h2 className="text-2xl font-bold text-gray-800">Daily Attendance Status</h2>
+        <span className="text-gray-500 bg-gray-100 px-3 py-1 rounded-lg text-sm font-medium">{formatDate({ seconds: new Date().getTime() / 1000 })}</span>
       </div>
-      
+
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4 space-y-4">
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+          <p className="text-sm font-semibold text-gray-700">Working Hours Overview</p>
+          <p className="text-xs text-gray-500">Standard {workSchedule?.startTime || DEFAULT_WORK_SCHEDULE.startTime} - {workSchedule?.endTime || DEFAULT_WORK_SCHEDULE.endTime} • Grace {graceMinutes}m</p>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+          {summaryCards.map(card => (
+            <div key={card.label} className="flex items-center justify-between p-4 bg-slate-50 border border-slate-100 rounded-xl">
+              <div>
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">{card.label}</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">{card.value}</p>
+              </div>
+              <div className={`w-12 h-12 rounded-full flex items-center justify-center ${card.accent}`}>
+                <card.icon className="w-5 h-5" />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="space-y-4">
-           <div className="flex items-center justify-between mb-2">
-             <h3 className="font-semibold text-gray-700 flex items-center"><CheckCircle2 className="w-4 h-4 mr-2 text-green-500"/> Present ({presentEmployees.length})</h3>
-           </div>
-           {presentEmployees.length === 0 && <p className="text-gray-400 text-sm italic">No one has checked in yet.</p>}
-           {presentEmployees.map(u => {
-              const record = attendance.find(a => {
-                const d = safeDate(a.timestamp);
-                return a.userId === u.id && d.toISOString().split('T')[0] === todayStr && a.type === 'check-in';
-              });
-              return <EmployeeCard key={u.id} user={u} status="present" checkInTime={formatTime(record.timestamp)} />;
-           })}
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="font-semibold text-gray-700 flex items-center"><CheckCircle2 className="w-4 h-4 mr-2 text-green-500"/> Present ({presentEmployees.length})</h3>
+          </div>
+          {presentDetails.length === 0 && <p className="text-gray-400 text-sm italic">No one has checked in yet.</p>}
+          {presentDetails.map(detail => (
+            <EmployeeCard
+              key={detail.user.id}
+              user={detail.user}
+              status={detail.isLate ? 'late' : 'present'}
+              checkInTime={formatTime(detail.record?.timestamp)}
+            />
+          ))}
         </div>
 
         <div className="space-y-4">
-           <div className="flex items-center justify-between mb-2">
-             <h3 className="font-semibold text-gray-700 flex items-center"><XCircle className="w-4 h-4 mr-2 text-red-500"/> Absent ({absentEmployees.length})</h3>
-           </div>
-           {absentEmployees.length === 0 && <p className="text-gray-400 text-sm italic">Everyone is present!</p>}
-           {absentEmployees.map(u => <EmployeeCard key={u.id} user={u} status="absent" />)}
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="font-semibold text-gray-700 flex items-center"><XCircle className="w-4 h-4 mr-2 text-red-500"/> Absent ({absentEmployees.length})</h3>
+          </div>
+          {absentEmployees.length === 0 && <p className="text-gray-400 text-sm italic">Everyone is present!</p>}
+          {absentEmployees.map(u => <EmployeeCard key={u.id} user={u} status="absent" />)}
         </div>
       </div>
     </div>
@@ -1482,8 +1662,24 @@ const EmployeeDashboard = ({ user, attendance, tasks, leaves, onNavigate }) => {
   );
 };
 
-const ManagerDashboard = ({ users, attendance, leaves, onNavigate }) => {
+const ManagerDashboard = ({ users, attendance, leaves, onNavigate, workSchedule, onUpdateWorkSchedule }) => {
   const todayStr = new Date().toISOString().split('T')[0];
+  const currentSchedule = normalizeSchedule(workSchedule || DEFAULT_WORK_SCHEDULE);
+  const [scheduleForm, setScheduleForm] = useState(currentSchedule);
+
+  useEffect(() => {
+    setScheduleForm(normalizeSchedule(workSchedule || DEFAULT_WORK_SCHEDULE));
+  }, [workSchedule]);
+
+  const handleScheduleChange = (field, value) => {
+    setScheduleForm(prev => ({ ...prev, [field]: value }));
+  };
+
+  const handleScheduleSubmit = async (e) => {
+    e.preventDefault();
+    if (!onUpdateWorkSchedule) return;
+    await onUpdateWorkSchedule(scheduleForm);
+  };
   
   // Stats Logic
   const totalEmployees = users.filter(u => u.role === 'employee').length;
@@ -1494,6 +1690,9 @@ const ManagerDashboard = ({ users, attendance, leaves, onNavigate }) => {
     })
     .map(a => a.userId)
   ).size;
+  const presencePercent = totalEmployees > 0
+    ? Math.min(100, Math.max(0, (presentToday / totalEmployees) * 100))
+    : 0;
   
   const pendingLeaves = leaves.filter(l => l.status === 'pending').length;
 
@@ -1522,8 +1721,8 @@ const ManagerDashboard = ({ users, attendance, leaves, onNavigate }) => {
             <h3 className="text-4xl font-bold text-green-600">{presentToday}</h3>
             <div className="text-sm text-gray-400 mb-1">/ {totalEmployees} Active</div>
           </div>
-          <div className="w-full bg-gray-100 rounded-full h-2 mt-4">
-            <div className="bg-green-500 h-2 rounded-full" style={{ width: `${(presentToday/totalEmployees)*100}%` }}></div>
+          <div className="w-full bg-gray-100 rounded-full h-2 mt-4 overflow-hidden">
+            <div className="bg-green-500 h-2 rounded-full" style={{ width: `${presencePercent}%` }}></div>
           </div>
         </div>
 
@@ -1588,6 +1787,59 @@ const ManagerDashboard = ({ users, attendance, leaves, onNavigate }) => {
            </div>
         </div>
       </div>
+
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
+          <div>
+            <h3 className="font-bold text-gray-800">Working Hours Settings</h3>
+            <p className="text-sm text-gray-500">Update the default workday window used for late check-in tracking.</p>
+          </div>
+          <div className="text-xs text-gray-500 bg-gray-100 px-3 py-1 rounded-full">
+            Current: {currentSchedule.startTime} - {currentSchedule.endTime} • Grace {currentSchedule.graceMinutes}m
+          </div>
+        </div>
+        <form onSubmit={handleScheduleSubmit} className="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div>
+            <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Start Time</label>
+            <input
+              type="time"
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              value={scheduleForm.startTime}
+              onChange={(e) => handleScheduleChange('startTime', e.target.value)}
+              required
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">End Time</label>
+            <input
+              type="time"
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              value={scheduleForm.endTime}
+              onChange={(e) => handleScheduleChange('endTime', e.target.value)}
+              required
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Grace Minutes</label>
+            <input
+              type="number"
+              min="0"
+              max="120"
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              value={scheduleForm.graceMinutes}
+              onChange={(e) => handleScheduleChange('graceMinutes', Number(e.target.value))}
+            />
+          </div>
+          <div className="flex items-end">
+            <button
+              type="submit"
+              className="w-full md:w-auto px-4 py-2 bg-indigo-600 text-white rounded-lg font-semibold hover:bg-indigo-700 transition-colors"
+            >
+              Save Schedule
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 };
@@ -1648,6 +1900,7 @@ export default function App() {
   const [attendance, setAttendance] = useState([]);
   const [leaves, setLeaves] = useState([]);
   const [tasks, setTasks] = useState([]);
+  const [workSchedule, setWorkSchedule] = useState(() => ({ ...DEFAULT_WORK_SCHEDULE }));
   
   const [loading, setLoading] = useState(true);
   const [seeding, setSeeding] = useState(false);
@@ -1701,6 +1954,19 @@ export default function App() {
     };
   }, [user]);
 
+  useEffect(() => {
+    if (!user) return;
+    const unsubscribeSchedule = onSnapshot(getWorkScheduleDocRef(), (snap) => {
+      if (snap.exists()) {
+        setWorkSchedule(normalizeSchedule(snap.data()));
+      } else {
+        setWorkSchedule({ ...DEFAULT_WORK_SCHEDULE });
+      }
+    }, (err) => console.error('Work schedule listener error:', err));
+
+    return () => unsubscribeSchedule();
+  }, [user]);
+
   // 3. Seed Data (Only runs once if DB is empty)
   const seedData = async () => {
     setSeeding(true);
@@ -1738,8 +2004,24 @@ export default function App() {
       title,
       dueDate, // Store as string YYYY-MM-DD or null
       status: TASK_STATUS.PENDING,
-      createdAt: serverTimestamp()
+      createdAt: serverTimestamp(),
+      assignedBy: selectedProfile.id,
+      assignedByName: selectedProfile.name || 'Manager',
     });
+  };
+
+  const handleAssignTasks = async ({ title, dueDate, assigneeIds }) => {
+    if (!selectedProfile || assigneeIds.length === 0) return;
+    const taskCollection = collection(db, 'artifacts', appId, 'public', 'data', COLLECTIONS.TASKS);
+    const payloadBase = {
+      title,
+      dueDate,
+      status: TASK_STATUS.PENDING,
+      createdAt: serverTimestamp(),
+      assignedBy: selectedProfile.id,
+      assignedByName: selectedProfile.name || 'Manager',
+    };
+    await Promise.all(assigneeIds.map((userId) => addDoc(taskCollection, { ...payloadBase, userId })));
   };
 
   const handleToggleTask = async (task) => {
@@ -1773,6 +2055,11 @@ export default function App() {
     await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', COLLECTIONS.USERS, userId));
   };
 
+  const handleUpdateWorkSchedule = async (schedule) => {
+    const normalized = normalizeSchedule(schedule);
+    await setDoc(getWorkScheduleDocRef(), normalized, { merge: true });
+  };
+
   // 5. Render Logic
   if (loading) return <div className="flex h-screen items-center justify-center bg-indigo-50 text-indigo-600">Loading Platform...</div>;
 
@@ -1798,11 +2085,20 @@ export default function App() {
         <div className="max-w-5xl mx-auto">
           {selectedProfile.role === 'manager' && (
             <>
-              {view === 'manager_overview' && <ManagerDashboard users={users} attendance={attendance} leaves={leaves} onNavigate={setView} />}
+              {view === 'manager_overview' && (
+                <ManagerDashboard 
+                  users={users} 
+                  attendance={attendance} 
+                  leaves={leaves} 
+                  onNavigate={setView}
+                  workSchedule={workSchedule}
+                  onUpdateWorkSchedule={handleUpdateWorkSchedule}
+                />
+              )}
               {view === 'manager_stats' && <ManagerStatsView users={users} attendance={attendance} leaves={leaves} tasks={tasks} />} 
               {view === 'employees' && <EmployeesList users={users} attendance={attendance} leaves={leaves} tasks={tasks} onAddUser={handleAddUser} onDeleteUser={handleDeleteUser} />}
-              {view === 'daily_status' && <DailyStatusView users={users} attendance={attendance} />}
-              {view === 'employee_tasks' && <ManagerTaskView users={users} tasks={tasks} />}
+              {view === 'daily_status' && <DailyStatusView users={users} attendance={attendance} workSchedule={workSchedule} />}
+              {view === 'employee_tasks' && <ManagerTaskView users={users} tasks={tasks} onAssignTask={handleAssignTasks} />}
               {view === 'approvals' && <ApprovalView users={users} leaves={leaves} updateLeaveStatus={handleUpdateLeaveStatus} />}
             </>
           )}
