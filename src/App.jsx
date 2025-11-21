@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
@@ -128,6 +128,15 @@ const formatDueDate = (dateString) => {
   const [y, m, d] = dateString.split('-').map(Number);
   const date = new Date(y, m - 1, d); 
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+};
+
+const formatDuration = (totalMinutes) => {
+  if (!Number.isFinite(totalMinutes) || totalMinutes <= 0) return '0m';
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = Math.round(totalMinutes % 60);
+  if (hours && minutes) return `${hours}h ${minutes}m`;
+  if (hours) return `${hours}h`;
+  return `${minutes}m`;
 };
 
 // --- Components ---
@@ -645,17 +654,40 @@ const ManagerTaskView = ({ users, tasks, onAssignTask }) => {
   );
 };
 
-const AttendanceView = ({ user, recordAttendance, attendance }) => {
+const AttendanceView = ({ user, recordAttendance, attendance, workSchedule = DEFAULT_WORK_SCHEDULE }) => {
   const todayStr = new Date().toISOString().split('T')[0];
-  
-  const todayRecords = attendance
-    .filter(a => {
-      const d = safeDate(a.timestamp);
-      return a.userId === user.id && d && d.toISOString().split('T')[0] === todayStr;
-    })
-    .sort((a, b) => (a.timestamp?.seconds || 0) - (b.timestamp?.seconds || 0));
 
+  const todayRecords = useMemo(() => (
+    attendance
+      .filter(a => {
+        const d = safeDate(a.timestamp);
+        return a.userId === user.id && d && d.toISOString().split('T')[0] === todayStr;
+      })
+      .sort((a, b) => (a.timestamp?.seconds || 0) - (b.timestamp?.seconds || 0))
+  ), [attendance, user.id, todayStr]);
+
+  const firstCheckIn = useMemo(() => todayRecords.find(record => record.type === 'check-in'), [todayRecords]);
   const isCheckedIn = todayRecords.length > 0 && todayRecords[todayRecords.length - 1].type === 'check-in';
+
+  const scheduleStartMinutes = useMemo(
+    () => timeStringToMinutes(workSchedule?.startTime) ?? timeStringToMinutes(DEFAULT_WORK_SCHEDULE.startTime),
+    [workSchedule?.startTime]
+  );
+  const graceMinutes = useMemo(
+    () => Number(workSchedule?.graceMinutes ?? DEFAULT_WORK_SCHEDULE.graceMinutes) || 0,
+    [workSchedule?.graceMinutes]
+  );
+  const lateThresholdMinutes = scheduleStartMinutes === null ? null : scheduleStartMinutes + graceMinutes;
+  const firstCheckInMinutes = minutesFromTimestamp(firstCheckIn?.timestamp);
+  const isLateToday = Boolean(
+    firstCheckIn &&
+    lateThresholdMinutes !== null &&
+    firstCheckInMinutes !== null &&
+    firstCheckInMinutes > lateThresholdMinutes
+  );
+  const lateMinutes = isLateToday ? Math.round(firstCheckInMinutes - lateThresholdMinutes) : 0;
+  const lateDurationLabel = useMemo(() => formatDuration(lateMinutes), [lateMinutes]);
+  const lateCheckInId = firstCheckIn?.id || null;
 
   return (
     <div className="max-w-2xl mx-auto space-y-8">
@@ -676,12 +708,26 @@ const AttendanceView = ({ user, recordAttendance, attendance }) => {
             <span className="text-lg font-bold">{isCheckedIn ? 'Clock Out' : 'Clock In'}</span>
           </button>
         </div>
-        
-        <p className="mt-6 text-sm text-gray-500">
-          {isCheckedIn 
-            ? 'You are currently clocked in.' 
-            : 'You are currently clocked out.'}
-        </p>
+        <div className="mt-6 space-y-2">
+          <p className="text-sm text-gray-500">
+            {isCheckedIn 
+              ? 'You are currently clocked in.' 
+              : 'You are currently clocked out.'}
+          </p>
+          {firstCheckIn ? (
+            <div className={`inline-flex items-center px-4 py-2 rounded-full text-sm font-semibold ${
+              isLateToday ? 'bg-yellow-100 text-yellow-800' : 'bg-green-100 text-green-700'
+            }`}>
+              {isLateToday ? <AlertCircle className="w-4 h-4 mr-2" /> : <CheckCircle2 className="w-4 h-4 mr-2" />}
+              {isLateToday 
+                ? `Late check-in • ${lateDurationLabel}`
+                : `On time • Checked in at ${formatTime(firstCheckIn.timestamp)}`}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-400">Workday starts at {workSchedule?.startTime || DEFAULT_WORK_SCHEDULE.startTime} (grace {graceMinutes}m).</p>
+          )}
+          <p className="text-xs text-gray-400">Schedule: {workSchedule?.startTime || DEFAULT_WORK_SCHEDULE.startTime} - {workSchedule?.endTime || DEFAULT_WORK_SCHEDULE.endTime}</p>
+        </div>
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-100">
@@ -692,9 +738,18 @@ const AttendanceView = ({ user, recordAttendance, attendance }) => {
           {todayRecords.length === 0 && <p className="text-gray-400 text-center py-4">No records for today.</p>}
           {todayRecords.map(record => (
             <div key={record.id} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-              <span className={`font-medium ${record.type === 'check-in' ? 'text-green-600' : 'text-red-600'}`}>
-                {record.type === 'check-in' ? 'Checked In' : 'Checked Out'}
-              </span>
+              <div className="flex items-center space-x-3">
+                <span className={`font-medium ${record.type === 'check-in' ? 'text-green-600' : 'text-red-600'}`}>
+                  {record.type === 'check-in' ? 'Checked In' : 'Checked Out'}
+                </span>
+                {record.type === 'check-in' && record.id === lateCheckInId && (
+                  <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                    isLateToday ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'
+                  }`}>
+                    {isLateToday ? `Late • ${lateDurationLabel}` : 'On Time'}
+                  </span>
+                )}
+              </div>
               <span className="font-mono text-gray-600">
                 {formatTime(record.timestamp)}
               </span>
@@ -1538,17 +1593,49 @@ const DailyStatusView = ({ users, attendance, workSchedule = DEFAULT_WORK_SCHEDU
   );
 };
 
-const EmployeeDashboard = ({ user, attendance, tasks, leaves, onNavigate }) => {
+const EmployeeDashboard = ({ user, attendance, tasks, leaves, onNavigate, workSchedule = DEFAULT_WORK_SCHEDULE }) => {
   const todayStr = new Date().toISOString().split('T')[0];
-  
-  const todayAttendance = attendance.find(a => {
-    const d = safeDate(a.timestamp);
-    return a.userId === user.id && d && d.toISOString().split('T')[0] === todayStr;
-  });
+
+  const todayRecords = useMemo(() => (
+    attendance
+      .filter(a => {
+        const d = safeDate(a.timestamp);
+        return a.userId === user.id && d && d.toISOString().split('T')[0] === todayStr;
+      })
+      .sort((a, b) => (a.timestamp?.seconds || 0) - (b.timestamp?.seconds || 0))
+  ), [attendance, user.id, todayStr]);
+
+  const todayAttendance = todayRecords.find(record => record.type === 'check-in') || null;
 
   const pendingTasksList = tasks.filter(t => t.userId === user.id && t.status === TASK_STATUS.PENDING);
   const pendingTasks = pendingTasksList.length;
   const approvedLeaves = leaves.filter(l => l.userId === user.id && l.status === 'approved').length;
+
+  const scheduleStartMinutes = useMemo(
+    () => timeStringToMinutes(workSchedule?.startTime) ?? timeStringToMinutes(DEFAULT_WORK_SCHEDULE.startTime),
+    [workSchedule?.startTime]
+  );
+  const graceMinutes = useMemo(
+    () => Number(workSchedule?.graceMinutes ?? DEFAULT_WORK_SCHEDULE.graceMinutes) || 0,
+    [workSchedule?.graceMinutes]
+  );
+  const lateThresholdMinutes = scheduleStartMinutes === null ? null : scheduleStartMinutes + graceMinutes;
+  const firstCheckInMinutes = minutesFromTimestamp(todayAttendance?.timestamp);
+  const isLateToday = Boolean(
+    todayAttendance &&
+    lateThresholdMinutes !== null &&
+    firstCheckInMinutes !== null &&
+    firstCheckInMinutes > lateThresholdMinutes
+  );
+  const lateMinutes = isLateToday ? Math.round(firstCheckInMinutes - lateThresholdMinutes) : 0;
+  const lateDurationLabel = useMemo(() => formatDuration(lateMinutes), [lateMinutes]);
+  const lateCheckInId = todayAttendance?.id || null;
+
+  const attendanceBadge = todayAttendance
+    ? isLateToday
+      ? { label: 'Late Today', className: 'bg-yellow-100 text-yellow-700' }
+      : { label: 'On Time', className: 'bg-green-100 text-green-700' }
+    : { label: 'Not Checked In', className: 'bg-gray-100 text-gray-600' };
 
   return (
     <div className="space-y-6">
@@ -1561,13 +1648,18 @@ const EmployeeDashboard = ({ user, attendance, tasks, leaves, onNavigate }) => {
         >
           <div className="flex items-center justify-between mb-4">
             <div className="p-2 bg-blue-50 text-blue-600 rounded-lg"><Clock className="w-6 h-6" /></div>
-            <span className={`text-xs font-bold px-2 py-1 rounded-full ${todayAttendance ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
-              {todayAttendance ? 'Checked In' : 'Not Checked In'}
+            <span className={`text-xs font-bold px-2 py-1 rounded-full ${attendanceBadge.className}`}>
+              {attendanceBadge.label}
             </span>
           </div>
           <p className="text-sm text-gray-500">Today's Status</p>
           <p className="text-2xl font-bold text-gray-800">
             {todayAttendance ? formatTime(todayAttendance.timestamp) : '-- : --'}
+          </p>
+          <p className="text-xs text-gray-500 mt-1">
+            {todayAttendance
+              ? isLateToday ? `Late by ${lateDurationLabel} (grace ${graceMinutes}m)` : 'On-time arrival'
+              : `Starts ${workSchedule?.startTime || DEFAULT_WORK_SCHEDULE.startTime} (grace ${graceMinutes}m)`}
           </p>
         </div>
 
@@ -1617,6 +1709,13 @@ const EmployeeDashboard = ({ user, attendance, tasks, leaves, onNavigate }) => {
                     <div className="flex items-center space-x-3">
                       <div className={`w-2 h-2 rounded-full ${record.type === 'check-in' ? 'bg-green-500' : 'bg-red-500'}`}></div>
                       <span className="text-gray-700 font-medium capitalize">{record.type.replace('-', ' ')}</span>
+                      {record.type === 'check-in' && record.id === lateCheckInId && (
+                        <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                          isLateToday ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'
+                        }`}>
+                          {isLateToday ? `Late • ${lateDurationLabel}` : 'On Time'}
+                        </span>
+                      )}
                     </div>
                     <span className="text-gray-500">
                       {formatDate(record.timestamp)} at {formatTime(record.timestamp)}
@@ -1845,45 +1944,232 @@ const ManagerDashboard = ({ users, attendance, leaves, onNavigate, workSchedule,
 };
 
 const ApprovalView = ({ users, leaves, updateLeaveStatus }) => {
-  const pending = leaves.filter(l => l.status === 'pending');
+  const [activeTab, setActiveTab] = useState('active');
+  const [filterMode, setFilterMode] = useState('month'); // month | year | all
+  const [filterMonth, setFilterMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [filterYear, setFilterYear] = useState(new Date().getFullYear().toString());
+
+  const availableYears = useMemo(() => {
+    const years = Array.from(new Set(
+      leaves
+        .map(l => {
+          const date = safeDate(l.createdAt);
+          return date ? date.getFullYear() : null;
+        })
+        .filter(Boolean)
+    ));
+    return years.sort((a, b) => b - a);
+  }, [leaves]);
+
+  const filterByPeriod = useCallback((record) => {
+    if (filterMode === 'all') return true;
+    const created = safeDate(record.createdAt);
+    if (!created) return false;
+    if (filterMode === 'month') {
+      return created.toISOString().slice(0, 7) === filterMonth;
+    }
+    if (filterMode === 'year') {
+      return created.getFullYear().toString() === filterYear;
+    }
+    return true;
+  }, [filterMode, filterMonth, filterYear]);
+
+  const filteredLeaves = useMemo(() => leaves.filter(filterByPeriod), [leaves, filterByPeriod]);
+  const activeRequests = useMemo(() => filteredLeaves
+    .filter(l => l.status === 'pending')
+    .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0))
+  , [filteredLeaves]);
+  const historyRequests = useMemo(() => filteredLeaves
+    .filter(l => l.status !== 'pending')
+    .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0))
+  , [filteredLeaves]);
+
+  const statusSummary = useMemo(() => {
+    return filteredLeaves.reduce((acc, cur) => {
+      const statusKey = cur.status === 'approved' || cur.status === 'rejected' ? cur.status : 'pending';
+      acc[statusKey] = (acc[statusKey] || 0) + 1;
+      return acc;
+    }, { pending: 0, approved: 0, rejected: 0 });
+  }, [filteredLeaves]);
+
+  const typeStats = useMemo(() => {
+    const map = new Map();
+    filteredLeaves.forEach(req => {
+      const key = req.type || 'Other';
+      if (!map.has(key)) {
+        map.set(key, { type: key, total: 0, pending: 0, approved: 0, rejected: 0 });
+      }
+      const bucket = map.get(key);
+      bucket.total += 1;
+      const statusKey = req.status === 'approved' || req.status === 'rejected' ? req.status : 'pending';
+      bucket[statusKey] += 1;
+    });
+    return Array.from(map.values()).sort((a, b) => b.total - a.total);
+  }, [filteredLeaves]);
+
+  const renderRequestCard = (request, showActions = false) => {
+    const requester = users.find(u => u.id === request.userId);
+    return (
+      <div key={request.id} className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="flex items-start space-x-4">
+          <div className="w-10 h-10 rounded-full bg-orange-100 text-orange-600 flex items-center justify-center font-bold">
+            {requester?.name?.charAt(0) || '?'}
+          </div>
+          <div>
+            <h4 className="font-bold text-gray-800">{requester?.name || 'Unknown Employee'}</h4>
+            <p className="text-sm text-indigo-600 font-medium">{request.type}</p>
+            <p className="text-sm text-gray-500">{request.startDate} - {request.endDate}</p>
+            {request.reason && <p className="text-sm text-gray-600 mt-2 bg-gray-50 p-2 rounded">"{request.reason}"</p>}
+            {request.createdAt && (
+              <p className="text-xs text-gray-400 mt-1">Requested on {formatDate(request.createdAt)}</p>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center space-x-2">
+          {!showActions && (
+            <span className={`text-xs font-bold px-3 py-1 rounded-full capitalize ${
+              request.status === 'approved' ? 'bg-green-100 text-green-700' :
+              request.status === 'rejected' ? 'bg-red-100 text-red-700' :
+              'bg-yellow-100 text-yellow-700'
+            }`}>
+              {request.status}
+            </span>
+          )}
+          {showActions && (
+            <>
+              <button 
+                onClick={() => updateLeaveStatus(request.id, 'rejected')}
+                className="px-4 py-2 border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition-colors flex items-center"
+              >
+                <XCircle className="w-4 h-4 mr-2" /> Reject
+              </button>
+              <button 
+                onClick={() => updateLeaveStatus(request.id, 'approved')}
+                className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors flex items-center"
+              >
+                <CheckCircle2 className="w-4 h-4 mr-2" /> Approve
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const statusCards = [
+    { label: 'Pending', value: statusSummary.pending, accent: 'bg-yellow-50 text-yellow-700', icon: Clock },
+    { label: 'Approved', value: statusSummary.approved, accent: 'bg-green-50 text-green-700', icon: CheckCircle2 },
+    { label: 'Rejected', value: statusSummary.rejected, accent: 'bg-red-50 text-red-700', icon: XCircle },
+  ];
 
   return (
     <div className="space-y-6">
-      <h2 className="text-2xl font-bold text-gray-800">Pending Approvals</h2>
-      <div className="space-y-4">
-        {pending.length === 0 && <p className="text-gray-500">No pending requests.</p>}
-        {pending.map(request => {
-          const requester = users.find(u => u.id === request.userId);
-          return (
-            <div key={request.id} className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
-              <div className="flex items-start space-x-4">
-                <div className="w-10 h-10 rounded-full bg-orange-100 text-orange-600 flex items-center justify-center font-bold">
-                  {requester?.name.charAt(0)}
-                </div>
-                <div>
-                  <h4 className="font-bold text-gray-800">{requester?.name}</h4>
-                  <p className="text-sm text-indigo-600 font-medium">{request.type}</p>
-                  <p className="text-sm text-gray-500">{request.startDate} - {request.endDate}</p>
-                  {request.reason && <p className="text-sm text-gray-600 mt-2 bg-gray-50 p-2 rounded">"{request.reason}"</p>}
-                </div>
-              </div>
-              <div className="flex space-x-2">
-                <button 
-                  onClick={() => updateLeaveStatus(request.id, 'rejected')}
-                  className="px-4 py-2 border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition-colors flex items-center"
-                >
-                  <XCircle className="w-4 h-4 mr-2" /> Reject
-                </button>
-                <button 
-                  onClick={() => updateLeaveStatus(request.id, 'approved')}
-                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors flex items-center"
-                >
-                  <CheckCircle2 className="w-4 h-4 mr-2" /> Approve
-                </button>
-              </div>
+      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+        <div>
+          <h2 className="text-2xl font-bold text-gray-800">Approval Center</h2>
+          <p className="text-sm text-gray-500">Manage incoming requests and review historical decisions.</p>
+        </div>
+        <div className="flex flex-col sm:flex-row gap-2">
+          <div className="bg-gray-100 p-1 rounded-lg flex">
+            {['active', 'history'].map(tab => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${
+                  activeTab === tab ? 'bg-white text-indigo-600 shadow' : 'text-gray-500'
+                }`}
+              >
+                {tab === 'active' ? 'Active Approvals' : 'History'}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-lg px-3 py-1.5">
+            <select
+              value={filterMode}
+              onChange={e => setFilterMode(e.target.value)}
+              className="text-sm border-0 bg-transparent focus:outline-none"
+            >
+              <option value="month">Filter by Month</option>
+              <option value="year">Filter by Year</option>
+              <option value="all">All Time</option>
+            </select>
+            {filterMode === 'month' && (
+              <input
+                type="month"
+                value={filterMonth}
+                onChange={e => setFilterMonth(e.target.value)}
+                className="text-sm border border-gray-200 rounded-lg px-2 py-1"
+              />
+            )}
+            {filterMode === 'year' && (
+              <select
+                value={filterYear}
+                onChange={e => setFilterYear(e.target.value)}
+                className="text-sm border border-gray-200 rounded-lg px-2 py-1"
+              >
+                {availableYears.length > 0 ? (
+                  availableYears.map(year => (
+                    <option key={year} value={String(year)}>{year}</option>
+                  ))
+                ) : (
+                  <option value={filterYear}>{filterYear}</option>
+                )}
+              </select>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        {statusCards.map(card => (
+          <div key={card.label} className="bg-white border border-gray-100 rounded-xl p-4 flex items-center justify-between">
+            <div>
+              <p className="text-xs text-gray-500 uppercase font-semibold">{card.label}</p>
+              <p className="text-2xl font-bold text-gray-800 mt-1">{card.value}</p>
             </div>
-          )
-        })}
+            <div className={`w-10 h-10 rounded-full flex items-center justify-center ${card.accent}`}>
+              <card.icon className="w-5 h-5" />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {typeStats.length > 0 && (
+        <div className="bg-white border border-gray-100 rounded-xl p-4">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-semibold text-gray-700 flex items-center"><PieChart className="w-4 h-4 mr-2"/> Approval Types</h3>
+            <span className="text-xs text-gray-400">Filtered dataset</span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {typeStats.map(stat => (
+              <div key={stat.type} className="p-4 rounded-lg border border-gray-100 bg-slate-50">
+                <p className="text-sm font-semibold text-gray-700">{stat.type}</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">{stat.total}</p>
+                <div className="flex flex-wrap gap-2 mt-3 text-xs">
+                  <span className="px-2 py-0.5 bg-yellow-100 text-yellow-700 rounded-full font-semibold">Pending {stat.pending}</span>
+                  <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded-full font-semibold">Approved {stat.approved}</span>
+                  <span className="px-2 py-0.5 bg-red-100 text-red-700 rounded-full font-semibold">Rejected {stat.rejected}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-4">
+        {activeTab === 'active' ? (
+          <>
+            <h3 className="text-xl font-semibold text-gray-800">Active Approvals ({activeRequests.length})</h3>
+            {activeRequests.length === 0 && <p className="text-gray-500">No pending requests for the selected period.</p>}
+            {activeRequests.map(request => renderRequestCard(request, true))}
+          </>
+        ) : (
+          <>
+            <h3 className="text-xl font-semibold text-gray-800 flex items-center"><History className="w-4 h-4 mr-2"/>Decision History ({historyRequests.length})</h3>
+            {historyRequests.length === 0 && <p className="text-gray-500">No historical records for the selected period.</p>}
+            {historyRequests.map(request => renderRequestCard(request, false))}
+          </>
+        )}
       </div>
     </div>
   );
@@ -2103,8 +2389,24 @@ export default function App() {
             </>
           )}
 
-          {view === 'dashboard' && <EmployeeDashboard user={selectedProfile} attendance={attendance} tasks={tasks} leaves={leaves} onNavigate={setView} />}
-          {view === 'attendance' && <AttendanceView user={selectedProfile} recordAttendance={handleRecordAttendance} attendance={attendance} />}
+          {view === 'dashboard' && (
+            <EmployeeDashboard
+              user={selectedProfile}
+              attendance={attendance}
+              tasks={tasks}
+              leaves={leaves}
+              onNavigate={setView}
+              workSchedule={workSchedule}
+            />
+          )}
+          {view === 'attendance' && (
+            <AttendanceView
+              user={selectedProfile}
+              recordAttendance={handleRecordAttendance}
+              attendance={attendance}
+              workSchedule={workSchedule}
+            />
+          )}
           {view === 'tasks' && <TaskView user={selectedProfile} tasks={tasks} addTask={handleAddTask} toggleTask={handleToggleTask} />}
           {view === 'leave' && <LeaveView user={selectedProfile} leaves={leaves} submitLeave={handleSubmitLeave} />}
         </div>
